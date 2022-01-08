@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -33,16 +34,21 @@ type Config interface {
 }
 
 type Backend interface {
-	Dial(hostname string) (NetConn, error)
+	Dial(ctx context.Context, hostname string) (NetConn, error)
 }
 
 type NetConn interface {
-	io.Reader
-	io.Writer
-	io.Closer
+	// io.Reader
+	// io.Writer
+	// io.Closer
+
+	net.Conn
 
 	CloseRead() error
 	CloseWrite() error
+
+	// LocalAddr() net.Addr
+	// RemoteAddr() net.Addr
 }
 
 func (c *Conn) logf(msg string, args ...interface{}) {
@@ -102,9 +108,10 @@ func (c *Conn) proxy() {
 		return
 	}
 
-	backendConn, err := c.backend.Dial(c.hostname)
+	ctx := context.TODO()
+	backendConn, err := c.backend.Dial(ctx, c.hostname)
 	if err != nil {
-		c.internalError("failed to dial backend %q for %q: %s", c.backend, c.hostname, err)
+		c.internalError("failed to dial backend %s for %q: %s", c.backend, c.hostname, err)
 		return
 	}
 	defer backendConn.Close()
@@ -142,9 +149,9 @@ func (c *Conn) proxy() {
 
 func proxy(wg *sync.WaitGroup, a, b NetConn) {
 	defer wg.Done()
-	atcp, btcp := a.(*net.TCPConn), b.(*net.TCPConn)
-	if _, err := io.Copy(atcp, btcp); err != nil {
-		log.Printf("%s<>%s -> %s<>%s: %s", atcp.RemoteAddr(), atcp.LocalAddr(), btcp.LocalAddr(), btcp.RemoteAddr(), err)
+	//atcp, btcp := a.(*net.TCPConn), b.(*net.TCPConn)
+	if _, err := io.Copy(a, b); err != nil {
+		log.Printf("%s<>%s -> %s<>%s: %s", a.RemoteAddr(), a.LocalAddr(), b.LocalAddr(), b.RemoteAddr(), err)
 	}
 	b.CloseWrite()
 	a.CloseRead()

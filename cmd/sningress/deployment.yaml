@@ -105,7 +105,17 @@ spec:
       - name: sningress-server
         image: sningress-server
         args:
-        - --listen=:8132 
+        - --listen-https=:8132
+        - --listen-http=:8080
         env:
         - name: KUBERNETES_SERVICE_HOST
           value: "127.0.0.1"
+        volumeMounts:
+        - name: konnectivity-uds
+          mountPath: /etc/kubernetes/konnectivity-server/uds
+          readOnly: false
+      volumes:
+      - name: konnectivity-uds
+        hostPath:
+          path: /etc/kubernetes/konnectivity-server/uds
+          type: DirectoryOrCreate
