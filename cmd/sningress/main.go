@@ -5,8 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
-	"inet.af/tcpproxy"
+	"inet.af/tcpproxy/pkg/proxy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -25,32 +26,52 @@ func main() {
 func run(ctx context.Context) error {
 	klog.InitFlags(nil)
 
+	helloTimeout := 3 * time.Second
 	listen := ":8443"
 	flag.StringVar(&listen, "listen", listen, "endpoint on which to listen locally")
 	kubeconfig := ""
 	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "path to the kubeconfig file")
 	flag.Parse()
 
-	var config *rest.Config
+	var restConfig *rest.Config
 	if kubeconfig == "" {
 		c, err := rest.InClusterConfig()
 		if err != nil {
 			return fmt.Errorf("error loading in-cluster kube config: %w", err)
 		}
-		config = c
+		restConfig = c
 	} else {
 		c, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 		if err != nil {
 			return fmt.Errorf("error loading kubeconfig in %q: %w", kubeconfig, err)
 		}
-		config = c
+		restConfig = c
 	}
 
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return fmt.Errorf("error building kubernetes client: %w", err)
 	}
 
+	var config Config
+	if err := config.BuildFromKubernetes(ctx, clientset); err != nil {
+		return fmt.Errorf("error reading kubernetes config: %w", err)
+	}
+
+	p := proxy.New(&config, helloTimeout)
+
+	return p.ListenAndServe(listen)
+}
+
+type Config struct {
+	hostnames map[string]*hostnameConfig
+}
+
+type hostnameConfig struct {
+	addresses []string
+}
+
+func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.Interface) error {
 	ingresses, err := clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("error listing ingresses: %w", err)
@@ -61,15 +82,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("error listing ingresses: %w", err)
 	}
 
-	var p tcpproxy.Proxy
-	//     p.AddHTTPHostRoute(":80", "foo.com", tcpproxy.To("10.0.0.1:8081"))
-	//     p.AddHTTPHostRoute(":80", "bar.com", tcpproxy.To("10.0.0.2:8082"))
-	//     p.AddRoute(":80", tcpproxy.To("10.0.0.1:8081")) // fallback
-	//     p.AddSNIRoute(":443", "foo.com", tcpproxy.To("10.0.0.1:4431"))
-	//     p.AddSNIRoute(":443", "bar.com", tcpproxy.To("10.0.0.2:4432"))
-	//     p.AddRoute(":443", tcpproxy.To("10.0.0.1:4431")) // fallback
-	//     log.Fatal(p.Run())
-
+	hostnames := make(map[string]*hostnameConfig)
 	for _, ingress := range ingresses.Items {
 		var addresses []string
 
@@ -118,13 +131,33 @@ func run(ctx context.Context) error {
 			continue
 		}
 
+		hostnameConfig := &hostnameConfig{
+			addresses: addresses,
+		}
+
 		for _, tls := range ingress.Spec.TLS {
 			for _, host := range tls.Hosts {
-				klog.Infof("%q sni(%q) => ingress %s/%s (service %s) => %v", listen, host, ingress.Namespace, ingress.Name, serviceName, addresses)
-				p.AddSNIRoute(listen, host, tcpproxy.To(addresses[0]))
+				klog.Infof("sni(%q) => ingress %s/%s (service %s) => %v", host, ingress.Namespace, ingress.Name, serviceName, addresses)
+				hostnames[host] = hostnameConfig
 			}
 		}
 	}
 
-	return p.Run()
+	c.hostnames = hostnames
+	return nil
+}
+
+// Match implements proxy.Config
+func (c *Config) Match(hostname string) (string, bool) {
+	config := c.hostnames[hostname]
+	if config == nil {
+		return "", false
+	}
+
+	if len(config.addresses) == 0 {
+		return "", false
+	}
+
+	klog.Infof("mapping %q => %q", hostname, config.addresses[0])
+	return config.addresses[0], false
 }
