@@ -22,6 +22,8 @@ import (
 	"io"
 	"net"
 	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 // AddSNIRoute appends a route to the ipPort listener that routes to
@@ -178,6 +180,7 @@ func clientHelloServerName(br *bufio.Reader) (sni string) {
 			return nil, nil
 		},
 	}).Handshake()
+	klog.Infof("extracted sni name %q", sni)
 	return
 }
 

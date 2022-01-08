@@ -1,0 +1,20 @@
+apiVersion: skaffold/v2beta27
+kind: Config
+metadata:
+  name: sningress
+build:
+  artifacts:
+  - image: sningress-server
+    docker:
+      dockerfile: cmd/sningress/Dockerfile
+  local:
+    useBuildkit: true
+deploy:
+  kubectl:
+    manifests:
+    - cmd/sningress/deployment.yaml
+portForward:
+- resourceType: service
+  resourceName: sningress-server
+  namespace: sningress-system
+  port: 443
