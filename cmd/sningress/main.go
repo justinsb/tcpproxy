@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -64,11 +65,7 @@ func run(ctx context.Context) error {
 }
 
 type Config struct {
-	hostnames map[string]*hostnameConfig
-}
-
-type hostnameConfig struct {
-	addresses []string
+	hostnames map[string]*backend
 }
 
 func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.Interface) error {
@@ -82,7 +79,7 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 		return fmt.Errorf("error listing ingresses: %w", err)
 	}
 
-	hostnames := make(map[string]*hostnameConfig)
+	hostnames := make(map[string]*backend)
 	for _, ingress := range ingresses.Items {
 		var addresses []string
 
@@ -131,14 +128,14 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 			continue
 		}
 
-		hostnameConfig := &hostnameConfig{
+		b := &backend{
 			addresses: addresses,
 		}
 
 		for _, tls := range ingress.Spec.TLS {
 			for _, host := range tls.Hosts {
 				klog.Infof("sni(%q) => ingress %s/%s (service %s) => %v", host, ingress.Namespace, ingress.Name, serviceName, addresses)
-				hostnames[host] = hostnameConfig
+				hostnames[host] = b
 			}
 		}
 	}
@@ -148,16 +145,33 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 }
 
 // Match implements proxy.Config
-func (c *Config) Match(hostname string) (string, bool) {
-	config := c.hostnames[hostname]
-	if config == nil {
-		return "", false
+func (c *Config) Match(hostname string) (proxy.Backend, bool) {
+	backend := c.hostnames[hostname]
+	if backend == nil {
+		return nil, false
 	}
 
-	if len(config.addresses) == 0 {
-		return "", false
+	return backend, false
+}
+
+type backend struct {
+	addresses []string
+}
+
+var _ proxy.Backend = &backend{}
+
+func (b *backend) Dial(hostname string) (proxy.NetConn, error) {
+	if len(b.addresses) == 0 {
+		return nil, fmt.Errorf("no addresses for backend")
 	}
 
-	klog.Infof("mapping %q => %q", hostname, config.addresses[0])
-	return config.addresses[0], false
+	addr := b.addresses[0]
+	klog.Infof("mapping %q => %q", hostname, addr)
+
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial %q: %w", addr, err)
+	}
+
+	return conn.(*net.TCPConn), nil
 }

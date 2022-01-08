@@ -23,13 +23,26 @@ type Conn struct {
 
 	tlsMinor    int
 	hostname    string
-	backend     string
-	backendConn *net.TCPConn
+	backend     Backend
+	backendConn NetConn
 }
 
 type Config interface {
 	// Match returns the backend for hostname, and whether to use the PROXY protocol.
-	Match(hostname string) (string, bool)
+	Match(hostname string) (backend Backend, useProxyProtocol bool)
+}
+
+type Backend interface {
+	Dial(hostname string) (NetConn, error)
+}
+
+type NetConn interface {
+	io.Reader
+	io.Writer
+	io.Closer
+
+	CloseRead() error
+	CloseWrite() error
 }
 
 func (c *Conn) logf(msg string, args ...interface{}) {
@@ -84,20 +97,19 @@ func (c *Conn) proxy() {
 
 	addProxyHeader := false
 	c.backend, addProxyHeader = c.config.Match(c.hostname)
-	if c.backend == "" {
+	if c.backend == nil {
 		c.sniFailed("no backend found for %q", c.hostname)
 		return
 	}
 
-	c.logf("routing %q to %q", c.hostname, c.backend)
-	backend, err := net.DialTimeout("tcp", c.backend, 10*time.Second)
+	backendConn, err := c.backend.Dial(c.hostname)
 	if err != nil {
 		c.internalError("failed to dial backend %q for %q: %s", c.backend, c.hostname, err)
 		return
 	}
-	defer backend.Close()
+	defer backendConn.Close()
 
-	c.backendConn = backend.(*net.TCPConn)
+	c.backendConn = backendConn
 
 	// If the backend supports the HAProxy PROXY protocol, give it the
 	// real source information about the connection.
@@ -128,12 +140,12 @@ func (c *Conn) proxy() {
 	wg.Wait()
 }
 
-func proxy(wg *sync.WaitGroup, a, b net.Conn) {
+func proxy(wg *sync.WaitGroup, a, b NetConn) {
 	defer wg.Done()
 	atcp, btcp := a.(*net.TCPConn), b.(*net.TCPConn)
 	if _, err := io.Copy(atcp, btcp); err != nil {
 		log.Printf("%s<>%s -> %s<>%s: %s", atcp.RemoteAddr(), atcp.LocalAddr(), btcp.LocalAddr(), btcp.RemoteAddr(), err)
 	}
-	btcp.CloseWrite()
-	atcp.CloseRead()
+	b.CloseWrite()
+	a.CloseRead()
 }
