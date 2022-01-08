@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package sni
 
 import (
 	"encoding/binary"
@@ -21,7 +21,7 @@ import (
 	"io"
 )
 
-func extractSNI(r io.Reader) (string, int, error) {
+func ExtractSNI(r io.Reader) (string, int, error) {
 	handshake, tlsver, err := handshakeRecord(r)
 	if err != nil {
 		return "", 0, fmt.Errorf("reading TLS record: %s", err)
