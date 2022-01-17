@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"inet.af/tcpproxy/pkg/proxy"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+
+	discoveryv1 "k8s.io/api/discovery/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 func main() {
@@ -62,13 +64,8 @@ func run(ctx context.Context) error {
 		restConfig = c
 	}
 
-	clientset, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return fmt.Errorf("error building kubernetes client: %w", err)
-	}
-
 	var config Config
-	if err := config.BuildFromKubernetes(ctx, clientset, tunnel); err != nil {
+	if err := config.BuildFromKubernetes(ctx, restConfig, tunnel); err != nil {
 		return fmt.Errorf("error reading kubernetes config: %w", err)
 	}
 
@@ -89,30 +86,56 @@ func run(ctx context.Context) error {
 }
 
 type Config struct {
-	hostnames map[string]*backend
+	ingresses IngressCache
+	endpoints EndpointCache
+
+	tunnel *tunnelBackend
 }
 
-func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.Interface, tunnel *tunnelBackend) error {
-	ingresses, err := clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
+func (c *Config) BuildFromKubernetes(ctx context.Context, restConfig *rest.Config, tunnel *tunnelBackend) error {
+	schema, err := NewSchema(networkingv1.AddToScheme, discoveryv1.AddToScheme)
 	if err != nil {
-		return fmt.Errorf("error listing ingresses: %w", err)
+		return err
+	}
+	kube, err := NewForConfig(restConfig, schema)
+	if err != nil {
+		return err
 	}
 
-	endpointSlices, err := clientset.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("error listing ingresses: %w", err)
+	namespace := ""
+
+	if err := c.ingresses.Start(ctx, kube, namespace); err != nil {
+		return fmt.Errorf("failed to watch ingresses: %w", err)
 	}
 
-	hostnames := make(map[string]*backend)
-	for _, ingress := range ingresses.Items {
+	if err := c.endpoints.Start(ctx, kube, namespace); err != nil {
+		return fmt.Errorf("failed to watch endpoints: %w", err)
+	}
+
+	if err := c.ingresses.WaitForSync(ctx); err != nil {
+		return fmt.Errorf("failed to sync ingresses: %w", err)
+	}
+
+	if err := c.endpoints.WaitForSync(ctx); err != nil {
+		return fmt.Errorf("failed to sync endpoints: %w", err)
+	}
+	return nil
+}
+
+func (c *Config) lookupHostname(hostname string) *backend {
+	ingresses := c.ingresses.LookupHostname(hostname)
+
+	var addresses []string
+
+	for _, ingress := range ingresses {
 		for _, rule := range ingress.Spec.Rules {
-			if rule.HTTP == nil {
-				klog.Warningf("skipping rule with no HTTP section: %v", ingress)
+			// TODO: Maybe we should index the rules instead of the ingress object?
+			if rule.Host != hostname {
 				continue
 			}
 
-			if rule.Host == "" {
-				klog.Warningf("skipping rule with no HTTP host: %v", ingress)
+			if rule.HTTP == nil {
+				klog.Warningf("skipping rule with no HTTP section: %v", ingress)
 				continue
 			}
 
@@ -127,12 +150,16 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 					continue
 				}
 
-				var addresses []string
-
 				serviceName := httpPath.Backend.Service.Name
 				servicePort := httpPath.Backend.Service.Port
 
-				for _, endpointSlice := range endpointSlices.Items {
+				// klog.Infof("hostname %q => ingress %s/%s => service %s", hostname, ingress.Namespace, ingress.Name, serviceName)
+
+				endpoints := c.endpoints.LookupService(types.NamespacedName{Namespace: ingress.Namespace, Name: serviceName})
+
+				for _, endpointSlice := range endpoints {
+					// klog.Infof("endpoints %v", endpointSlice)
+
 					if endpointSlice.Namespace != ingress.Namespace {
 						continue
 					}
@@ -169,33 +196,35 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 					}
 				}
 
-				if len(addresses) == 0 {
-					klog.Warningf("could not find endpoints for ingress %s/%s (service %s)", ingress.Namespace, ingress.Name, serviceName)
-					continue
-				}
-
-				b := &backend{
-					addresses: addresses,
-				}
-				klog.Warningf("HACK: assuming namespace != kube-system <=> use tunnel")
-				if ingress.Namespace != "kube-system" {
-					b.tunnel = tunnel
-				}
-
-				klog.Infof("%q => ingress %s/%s (service %s) => %v", rule.Host, ingress.Namespace, ingress.Name, serviceName, addresses)
-				hostnames[rule.Host] = b
 			}
 		}
 	}
 
-	c.hostnames = hostnames
-	return nil
+	if len(addresses) == 0 {
+		klog.Warningf("could not find endpoints for hostname %q", hostname)
+		return nil
+	}
+
+	klog.Infof("%q => %v", hostname, addresses)
+
+	b := &backend{
+		addresses: addresses,
+	}
+
+	klog.Warningf("HACK: assuming namespace != kube-system <=> use tunnel")
+	for _, ingress := range ingresses {
+		if ingress.Namespace != "kube-system" {
+			b.tunnel = c.tunnel
+		}
+	}
+
+	return b
 }
 
 func (c *Config) Dial(ctx context.Context, hostname string) (proxy.NetConn, error) {
-	backend := c.hostnames[hostname]
+	backend := c.lookupHostname(hostname)
 	if backend == nil {
-		return nil, fmt.Errorf("hostname %q not known", hostname)
+		return nil, fmt.Errorf("ingress not found for hostname %q", hostname)
 	}
 
 	return backend.Dial(ctx, hostname)
@@ -203,7 +232,7 @@ func (c *Config) Dial(ctx context.Context, hostname string) (proxy.NetConn, erro
 
 // Match implements proxy.Config
 func (c *Config) Match(hostname string) (proxy.Backend, bool) {
-	backend := c.hostnames[hostname]
+	backend := c.lookupHostname(hostname)
 	if backend == nil {
 		return nil, false
 	}
