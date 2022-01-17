@@ -34,7 +34,18 @@ func run(ctx context.Context) error {
 	flag.StringVar(&listenHTTP, "listen-http", listenHTTP, "endpoint on which to listen for http")
 	kubeconfig := ""
 	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "path to the kubeconfig file")
+
+	useTunnel := true
+	flag.BoolVar(&useTunnel, "use-tunnel", useTunnel, "should we use tunnel")
+
 	flag.Parse()
+
+	tunnel := &tunnelBackend{
+		proxyUdsName: "/etc/kubernetes/konnectivity-server/uds/konnectivity-server.socket",
+	}
+	if !useTunnel {
+		tunnel = nil
+	}
 
 	var restConfig *rest.Config
 	if kubeconfig == "" {
@@ -57,7 +68,7 @@ func run(ctx context.Context) error {
 	}
 
 	var config Config
-	if err := config.BuildFromKubernetes(ctx, clientset); err != nil {
+	if err := config.BuildFromKubernetes(ctx, clientset, tunnel); err != nil {
 		return fmt.Errorf("error reading kubernetes config: %w", err)
 	}
 
@@ -81,7 +92,7 @@ type Config struct {
 	hostnames map[string]*backend
 }
 
-func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.Interface) error {
+func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.Interface, tunnel *tunnelBackend) error {
 	ingresses, err := clientset.NetworkingV1().Ingresses("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("error listing ingresses: %w", err)
@@ -90,10 +101,6 @@ func (c *Config) BuildFromKubernetes(ctx context.Context, clientset kubernetes.I
 	endpointSlices, err := clientset.DiscoveryV1().EndpointSlices("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("error listing ingresses: %w", err)
-	}
-
-	tunnel := &tunnelBackend{
-		proxyUdsName: "/etc/kubernetes/konnectivity-server/uds/konnectivity-server.socket",
 	}
 
 	hostnames := make(map[string]*backend)

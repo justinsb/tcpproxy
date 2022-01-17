@@ -62,8 +62,9 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	host, _, err := net.SplitHostPort(req.Host)
 	if err != nil {
-		replyError(w, req, fmt.Errorf("cannot parse host %q: %w", req.Host, err))
-		return
+		host = req.Host
+		// replyError(w, req, fmt.Errorf("cannot parse host %q: %w", req.Host, err))
+		// return
 	}
 
 	klog.Infof("http request: %s %s %s", req.Method, req.Host, req.URL)
@@ -84,12 +85,17 @@ func (p *httpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	upstream.URL.Scheme = "http"
 	upstream.URL.Host = host
 
-	// TODO: Is any reuse safe?   (cookies etc)
-	httpClient := &http.Client{
-		Transport: p.transport,
-	}
+	// // TODO: Is any reuse safe?   (cookies etc)
+	// httpClient := &http.Client{
+	// 	Transport: p.transport,
 
-	resp, err := httpClient.Do(upstream)
+	// }
+	// resp, err := httpClient.Do(upstream)
+
+	// We use a transport instead of http.Client so we don't follow redirects
+	// Basing this on https://cs.opensource.google/go/go/+/refs/tags/go1.17.6:src/net/http/httputil/reverseproxy.go;l=42
+	// TODO: should we just use ReverseProxy?
+	resp, err := p.transport.RoundTrip(upstream)
 	if err != nil {
 		replyError(w, req, fmt.Errorf("failed to make request: %w", err))
 		return
