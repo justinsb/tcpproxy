@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -14,18 +13,29 @@ import (
 )
 
 type EndpointCache struct {
-	mutex sync.RWMutex
+	// mutex sync.RWMutex
 
-	endpoints map[types.NamespacedName]*discoveryv1.EndpointSlice
+	// endpoints map[types.NamespacedName]*discoveryv1.EndpointSlice
 
-	// We use an ImmutableList so we don't need a defensive copy
+	// serviceIndex MultiMap[types.NamespacedName, *discoveryv1.EndpointSlice]
 
-	serviceIndex map[types.NamespacedName]ImmutableList_EndpointSlice
+	endpoints IndexedMap[types.NamespacedName, *discoveryv1.EndpointSlice]
+	byService *MapIndex[types.NamespacedName, *discoveryv1.EndpointSlice, types.NamespacedName]
 }
 
+// func EndpointSliceToNamespaceName(v *discoveryv1.EndpointSlice) types.NamespacedName {
+// 	return types.NamespacedName{
+// 		Namespace: v.Namespace,
+// 		Name:      v.Name,
+// 	}
+// }
+
 func (c *EndpointCache) Start(ctx context.Context, kube *SimpleClientset, namespace string) error {
-	c.endpoints = make(map[types.NamespacedName]*discoveryv1.EndpointSlice)
-	c.serviceIndex = make(map[types.NamespacedName]ImmutableList_EndpointSlice)
+	// c.endpoints = make(map[types.NamespacedName]*discoveryv1.EndpointSlice)
+	// c.serviceIndex = NewMultiMap[types.NamespacedName, *discoveryv1.EndpointSlice]()
+
+	// c.endpoints = NewMapIndex (map[types.NamespacedName]*discoveryv1.EndpointSlice)
+	c.byService = AddIndex(&c.endpoints, computeServiceID)
 
 	resource, err := kube.Resource(discoveryv1.SchemeGroupVersion.WithResource("endpointslices"))
 	if err != nil {
@@ -52,21 +62,22 @@ func (c *EndpointCache) OnUpdate(obj runtime.Object) {
 		Namespace: endpoints.Namespace,
 		Name:      endpoints.Name,
 	}
+	c.endpoints.Put(key, endpoints)
 
-	newIndexed := computeServiceID(endpoints)
+	// newIndexed := computeServiceID(endpoints)
 
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	// c.mutex.Lock()
+	// defer c.mutex.Unlock()
 
-	old := c.endpoints[key]
-	oldIndexed := computeServiceID(old)
+	// old := c.endpoints[key]
+	// oldIndexed := computeServiceID(old)
 
-	c.endpoints[key] = endpoints
+	// c.endpoints[key] = endpoints
 
-	c.updateIndex(oldIndexed, newIndexed, endpoints)
+	// c.serviceIndex.Update(oldIndexed, newIndexed, endpoints, MapAndCompare(EndpointSliceToNamespaceName))
 }
 
-func computeServiceID(endpoints *discoveryv1.EndpointSlice) Optional_NamespacedName {
+func computeServiceID(endpoints *discoveryv1.EndpointSlice) []types.NamespacedName {
 	if endpoints == nil {
 		return nil
 	}
@@ -79,7 +90,7 @@ func computeServiceID(endpoints *discoveryv1.EndpointSlice) Optional_NamespacedN
 		return nil
 	}
 
-	return Optional_NamespacedName{
+	return []types.NamespacedName{
 		{Namespace: serviceNamespace, Name: serviceName},
 	}
 }
@@ -91,18 +102,19 @@ func (c *EndpointCache) OnDelete(obj runtime.Object) {
 		Name:      endpoints.Name,
 	}
 
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.endpoints.Delete(key)
+	// c.mutex.Lock()
+	// defer c.mutex.Unlock()
 
-	old := c.endpoints[key]
+	// old := c.endpoints[key]
 
-	if old != nil {
-		oldIndexed := computeServiceID(old)
+	// if old != nil {
+	// 	oldIndexed := computeServiceID(old)
 
-		delete(c.endpoints, key)
+	// 	delete(c.endpoints, key)
 
-		c.updateIndex(oldIndexed, nil, old)
-	}
+	// 	c.serviceIndex.Update(oldIndexed, nil, old, MapAndCompare(EndpointSliceToNamespaceName))
+	// }
 }
 
 type FormatJSON struct {
@@ -117,28 +129,10 @@ func (f FormatJSON) String() string {
 	return string(b)
 }
 
-func (c *EndpointCache) updateIndex(oldIndexed, newIndexed Optional_NamespacedName, endpoints *discoveryv1.EndpointSlice) {
-	for _, k := range newIndexed {
-		if oldIndexed.Contains(k) {
-			c.serviceIndex[k] = c.serviceIndex[k].Replace(endpoints)
-		} else {
-			c.serviceIndex[k] = c.serviceIndex[k].Add(endpoints)
-		}
-	}
+func (c *EndpointCache) LookupService(service types.NamespacedName) ImmutableList[*discoveryv1.EndpointSlice] {
+	// c.mutex.RLock()
+	// defer c.mutex.RUnlock()
 
-	for _, k := range oldIndexed {
-		if newIndexed.Contains(k) {
-			continue
-		}
-
-		c.serviceIndex[k] = c.serviceIndex[k].Remove(endpoints)
-	}
-}
-
-func (c *EndpointCache) LookupService(service types.NamespacedName) ImmutableList_EndpointSlice {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	values := c.serviceIndex[service]
+	values := c.byService.Lookup(service)
 	return values
 }

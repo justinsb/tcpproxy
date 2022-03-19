@@ -42,11 +42,11 @@ func run(ctx context.Context) error {
 
 	flag.Parse()
 
-	tunnel := &tunnelBackend{
-		proxyUdsName: "/etc/kubernetes/konnectivity-server/uds/konnectivity-server.socket",
-	}
-	if !useTunnel {
-		tunnel = nil
+	var tunnel *tunnelBackend
+	if useTunnel {
+		tunnel = &tunnelBackend{
+			proxyUdsName: "/etc/kubernetes/konnectivity-server/uds/konnectivity-server.socket",
+		}
 	}
 
 	var restConfig *rest.Config
@@ -211,10 +211,12 @@ func (c *Config) lookupHostname(hostname string) *backend {
 		addresses: addresses,
 	}
 
-	klog.Warningf("HACK: assuming namespace != kube-system <=> use tunnel")
-	for _, ingress := range ingresses {
-		if ingress.Namespace != "kube-system" {
-			b.tunnel = c.tunnel
+	if c.tunnel != nil {
+		klog.Warningf("HACK: assuming namespace != kube-system <=> use tunnel")
+		for _, ingress := range ingresses {
+			if ingress.Namespace != "kube-system" {
+				b.tunnel = c.tunnel
+			}
 		}
 	}
 

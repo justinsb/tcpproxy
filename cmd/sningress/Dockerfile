@@ -1,4 +1,4 @@
-FROM golang:1.17 as builder
+FROM golang:1.18 as builder
 
 # Copy in the go src
 WORKDIR /go/src/sningress
@@ -8,7 +8,15 @@ COPY go.sum go.sum
 COPY cmd/sningress/go.mod cmd/sningress/go.mod 
 COPY cmd/sningress/go.sum cmd/sningress/go.sum 
 RUN go mod download
-RUN cd ./cmd/sningress && CGO_ENABLED=0 go build k8s.io/apimachinery/pkg/apis/meta/v1 k8s.io/client-go/kubernetes k8s.io/client-go/tools/clientcmd k8s.io/klog/v2 sigs.k8s.io/apiserver-network-proxy/konnectivity-client/pkg/client
+RUN cd ./cmd/sningress && CGO_ENABLED=0 go build \
+	k8s.io/apimachinery/pkg/types \
+	k8s.io/client-go/rest \
+	k8s.io/client-go/tools/clientcmd \
+	k8s.io/klog/v2 \
+    k8s.io/api/discovery/v1 \
+	k8s.io/api/networking/v1 \
+    k8s.io/apimachinery/pkg/apis/meta/v1 \
+    google.golang.org/grpc
 COPY cmd/ cmd/
 COPY pkg/ pkg/
 COPY *.go ./

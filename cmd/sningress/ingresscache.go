@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -12,15 +11,27 @@ import (
 )
 
 type IngressCache struct {
-	mutex sync.RWMutex
+	// mutex sync.RWMutex
 
-	ingresses  map[types.NamespacedName]*networkingv1.Ingress
-	hostsIndex map[string]ImmutableList_Ingress
+	// ingresses  map[types.NamespacedName]*networkingv1.Ingress
+	// hostsIndex MultiMap[string, *networkingv1.Ingress]
+
+	ingresses IndexedMap[types.NamespacedName, *networkingv1.Ingress]
+	byHost    *MapIndex[types.NamespacedName, *networkingv1.Ingress, string]
 }
 
+// func NetworkingIngressToNamespaceName(k *networkingv1.Ingress) types.NamespacedName {
+// 	return types.NamespacedName{
+// 		Namespace: k.Namespace,
+// 		Name:      k.Name,
+// 	}
+// }
+
 func (c *IngressCache) Start(ctx context.Context, kube *SimpleClientset, namespace string) error {
-	c.ingresses = make(map[types.NamespacedName]*networkingv1.Ingress)
-	c.hostsIndex = make(map[string]ImmutableList_Ingress)
+	// c.ingresses = make(map[types.NamespacedName]*networkingv1.Ingress)
+	// c.hostsIndex = NewMultiMap[string, *networkingv1.Ingress]()
+
+	c.byHost = AddIndex(&c.ingresses, computeHosts)
 
 	resource, err := kube.Resource(networkingv1.SchemeGroupVersion.WithResource("ingresses"))
 	if err != nil {
@@ -48,17 +59,18 @@ func (c *IngressCache) OnUpdate(obj runtime.Object) {
 		Name:      ingress.Name,
 	}
 
-	newHosts := computeHosts(ingress)
+	c.ingresses.Put(key, ingress)
+	// newHosts := computeHosts(ingress)
 
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	// c.mutex.Lock()
+	// defer c.mutex.Unlock()
 
-	old := c.ingresses[key]
-	oldHosts := computeHosts(old)
+	// old := c.ingresses[key]
+	// oldHosts := computeHosts(old)
 
-	c.ingresses[key] = ingress
+	// c.ingresses[key] = ingress
 
-	c.updateIndex(oldHosts, newHosts, ingress)
+	// c.hostsIndex.Update(oldHosts, newHosts, ingress, MapAndCompare(NetworkingIngressToNamespaceName))
 
 	// for _, rule := range ingress.Spec.Rules {
 	// 	if rule.HTTP == nil {
@@ -96,12 +108,12 @@ func (c *IngressCache) OnUpdate(obj runtime.Object) {
 	// }
 }
 
-func computeHosts(ingress *networkingv1.Ingress) map[string]bool {
+func computeHosts(ingress *networkingv1.Ingress) []string {
 	if ingress == nil {
 		return nil
 	}
 
-	hosts := make(map[string]bool)
+	var hosts []string
 	for _, rule := range ingress.Spec.Rules {
 		if rule.HTTP == nil {
 			klog.Warningf("skipping rule with no HTTP section: %v", ingress)
@@ -113,7 +125,7 @@ func computeHosts(ingress *networkingv1.Ingress) map[string]bool {
 			continue
 		}
 
-		hosts[rule.Host] = true
+		hosts = append(hosts, rule.Host)
 	}
 	return hosts
 }
@@ -125,38 +137,21 @@ func (c *IngressCache) OnDelete(obj runtime.Object) {
 		Name:      ingress.Name,
 	}
 
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.ingresses.Delete(key)
+	// c.mutex.Lock()
+	// defer c.mutex.Unlock()
 
-	old := c.ingresses[key]
-	oldHosts := computeHosts(old)
+	// old := c.ingresses[key]
+	// oldHosts := computeHosts(old)
 
-	delete(c.ingresses, key)
+	// delete(c.ingresses, key)
 
-	c.updateIndex(oldHosts, nil, old)
+	// c.hostsIndex.Update(oldHosts, nil, old, MapAndCompare(NetworkingIngressToNamespaceName))
 }
 
-func (c *IngressCache) updateIndex(oldHosts, newHosts map[string]bool, ingress *networkingv1.Ingress) {
-	for k := range newHosts {
-		if oldHosts[k] {
-			c.hostsIndex[k] = c.hostsIndex[k].Replace(ingress)
-		} else {
-			c.hostsIndex[k] = c.hostsIndex[k].Add(ingress)
-		}
-	}
+func (c *IngressCache) LookupHostname(hostname string) ImmutableList[*networkingv1.Ingress] {
+	// c.mutex.RLock()
+	// defer c.mutex.RUnlock()
 
-	for k := range oldHosts {
-		if newHosts[k] {
-			continue
-		}
-
-		c.hostsIndex[k] = c.hostsIndex[k].Remove(ingress)
-	}
-}
-
-func (c *IngressCache) LookupHostname(hostname string) ImmutableList_Ingress {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	return c.hostsIndex[hostname]
+	return c.byHost.Lookup(hostname)
 }
